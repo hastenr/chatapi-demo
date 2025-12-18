@@ -1,0 +1,33 @@
+{
+  "name": "@hastenlabs/chatapi-cli",
+  "version": "1.0.0",
+  "description": "CLI demo for ChatAPI SDK",
+  "type": "module",
+  "bin": {
+    "chatapi": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "ts-node src/index.ts",
+    "demo": "npm run build && npm link && chatapi",
+    "dev": "nodemon --exec ts-node src/index.ts"
+  },
+  "keywords": ["chatapi", "cli", "demo", "chat"],
+  "author": "Hasten Labs",
+  "license": "MIT",
+  "dependencies": {
+    "@hastenr/chatapi-sdk": "^0.1.0",
+    "chalk": "^5.0.0",
+    "commander": "^10.0.0",
+    "isomorphic-ws": "^5.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^18.0.0",
+    "nodemon": "^2.0.0",
+    "ts-node": "^10.0.0",
+    "typescript": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}
