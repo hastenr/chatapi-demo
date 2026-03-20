@@ -1,0 +1,513 @@
+import { ChatAPI } from '@hastenr/chatapi-sdk';
+import './style.css';
+
+// ─── Config ───────────────────────────────────────────────────────────────────
+
+const BASE_URL   = import.meta.env.VITE_SERVER_URL as string;
+const MASTER_KEY = import.meta.env.VITE_MASTER_KEY as string;
+
+if (!BASE_URL || !MASTER_KEY) {
+  document.getElementById('app')!.innerHTML = `
+    <div class="boot-error">
+      <h2>Missing configuration</h2>
+      <p>Copy <code>.env.example</code> to <code>.env</code> and fill in your values, then restart the dev server.</p>
+      <pre>VITE_SERVER_URL=http://localhost:8080\nVITE_MASTER_KEY=your-master-key</pre>
+    </div>
+  `;
+  throw new Error('VITE_SERVER_URL and VITE_MASTER_KEY must be set in .env');
+}
+
+// ─── Demo Data ────────────────────────────────────────────────────────────────
+
+const LISTING = {
+  id:        'listing_mbp2021_sf',
+  title:     'MacBook Pro M1 (2021)',
+  price:     '$1,200',
+  condition: 'Like New',
+  specs:     '8GB RAM · 256GB SSD · Space Gray',
+  emoji:     '💻',
+};
+
+const BUYER  = { id: 'buyer_sarah',  name: 'Sarah Kim',  initials: 'SK' };
+const SELLER = { id: 'seller_mike',  name: 'Mike Chen',  initials: 'MC' };
+
+const ORDER_EVENTS = [
+  { label: 'Confirm Order',   icon: '✅', status: 'confirmed',       message: 'Your order has been confirmed!',         color: '#10b981' },
+  { label: 'Verify Payment',  icon: '💳', status: 'payment_verified', message: `Payment of ${LISTING.price} verified`,   color: '#6366f1' },
+  { label: 'Package Item',    icon: '📦', status: 'packaged',         message: 'Item has been securely packaged',        color: '#f59e0b' },
+  { label: 'Mark as Shipped', icon: '🚚', status: 'shipped',          message: 'Your order is on its way!', tracking: 'USPS9400111899223397718234', color: '#3b82f6' },
+] as const;
+
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+interface ChatMsg {
+  id: string;
+  senderId: string;
+  content: string;
+  seq: number;
+  time: string;
+  meta?: string;
+}
+
+// ─── Boot ─────────────────────────────────────────────────────────────────────
+
+renderLoading();
+boot().catch((err) => {
+  document.getElementById('app')!.innerHTML = `
+    <div class="boot-error">
+      <h2>Failed to start demo</h2>
+      <p>${err instanceof Error ? err.message : String(err)}</p>
+    </div>
+  `;
+});
+
+async function boot(): Promise<void> {
+  // 1. Provision a fresh demo tenant
+  const tenantRes = await fetch(`${BASE_URL}/admin/tenants`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Master-Key': MASTER_KEY },
+    body: JSON.stringify({ name: 'Marketplace Demo' }),
+  });
+  if (!tenantRes.ok) {
+    throw new Error(`Could not provision tenant (${tenantRes.status}). Check VITE_MASTER_KEY and that the server is running.`);
+  }
+  const { api_key: apiKey } = await tenantRes.json();
+
+  // 2. Buyer creates the listing DM room with rich metadata
+  const buyerSDK = new ChatAPI({ baseURL: BASE_URL, apiKey, userId: BUYER.id, displayName: BUYER.name });
+  const room = await buyerSDK.rooms.create({
+    type: 'dm',
+    members: [BUYER.id, SELLER.id],
+    metadata: JSON.stringify({
+      listing_id: LISTING.id,
+      title:      LISTING.title,
+      price:      LISTING.price,
+      condition:  LISTING.condition,
+      specs:      LISTING.specs,
+    }),
+  });
+
+  // 3. Connect both users via WebSocket
+  const sellerSDK = new ChatAPI({ baseURL: BASE_URL, apiKey, userId: SELLER.id, displayName: SELLER.name });
+  await Promise.all([buyerSDK.connect(), sellerSDK.connect()]);
+
+  // 4. Subscribe buyer to order update notifications
+  await buyerSDK.subscriptions.subscribe('order.updates');
+
+  // 5. Render
+  renderDemo(room.room_id, buyerSDK, sellerSDK);
+}
+
+// ─── Loading Screen ───────────────────────────────────────────────────────────
+
+function renderLoading(): void {
+  document.getElementById('app')!.innerHTML = `
+    <div class="loading-screen">
+      <div class="loading-card">
+        <div class="brand">
+          <span class="brand-dot"></span>
+          <span class="brand-name">ChatAPI</span>
+        </div>
+        <div class="spinner"></div>
+        <p>Setting up demo…</p>
+      </div>
+    </div>
+  `;
+}
+
+// ─── Demo Screen ──────────────────────────────────────────────────────────────
+
+function renderDemo(roomId: string, buyerSDK: ChatAPI, sellerSDK: ChatAPI): void {
+  const orderBtns = ORDER_EVENTS.map((e, i) => `
+    <button class="order-btn" id="order-btn-${i}" style="--accent:${e.color}">
+      <span class="order-btn-icon">${e.icon}</span>
+      <span class="order-btn-label">${e.label}</span>
+    </button>
+  `).join('');
+
+  document.getElementById('app')!.innerHTML = `
+    <div class="demo-screen">
+
+      <header class="demo-header">
+        <div class="header-left">
+          <div class="brand">
+            <span class="brand-dot"></span>
+            <span class="brand-name">ChatAPI</span>
+          </div>
+          <span class="live-badge">● Live</span>
+        </div>
+
+        <div class="listing-card">
+          <span class="listing-emoji">${LISTING.emoji}</span>
+          <div class="listing-info">
+            <div class="listing-title">${LISTING.title}</div>
+            <div class="listing-meta">
+              <strong>${LISTING.price}</strong>
+              <span class="sep">·</span>${LISTING.condition}
+              <span class="sep">·</span>${LISTING.specs}
+              <span class="sep">·</span>
+              <span class="listing-id-tag">#${LISTING.id}</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="feature-chips">
+          <span class="chip">⚡ Real-time</span>
+          <span class="chip">⌨️ Typing</span>
+          <span class="chip">👁 Presence</span>
+          <span class="chip">✓ Delivery</span>
+          <span class="chip">🏷 Metadata</span>
+          <span class="chip">🔔 Notifications</span>
+        </div>
+      </header>
+
+      <div class="panels">
+
+        <!-- Buyer Panel -->
+        <div class="panel">
+          <div class="panel-header">
+            <div class="user-row">
+              <div class="avatar avatar-buyer">${BUYER.initials}</div>
+              <div>
+                <div class="user-name">${BUYER.name}</div>
+                <div class="user-role">Buyer</div>
+              </div>
+            </div>
+            <div class="presence" id="buyer-presence">
+              <span class="presence-dot online"></span>
+              <span class="presence-label">Online</span>
+            </div>
+          </div>
+          <div class="messages" id="buyer-messages">
+            <div class="messages-empty">Type a message to start the conversation</div>
+          </div>
+          <div class="typing-row hidden" id="buyer-typing">
+            <div class="typing-bubbles"><span></span><span></span><span></span></div>
+            <span class="typing-label">${SELLER.name} is typing…</span>
+          </div>
+          <div class="input-row">
+            <input class="msg-input" id="buyer-input" type="text"
+              placeholder="Message as ${BUYER.name}…" autocomplete="off" />
+            <button class="send-btn send-buyer" id="buyer-send">↑</button>
+          </div>
+        </div>
+
+        <!-- Order Hub -->
+        <div class="order-hub">
+
+          <div class="hub-section">
+            <div class="hub-label">Room</div>
+            <div class="hub-room-id" title="${roomId}">${roomId.slice(0, 14)}…</div>
+          </div>
+
+          <div class="hub-section">
+            <div class="hub-label">Room Metadata</div>
+            <div class="meta-tags">
+              <span class="meta-tag">listing_id</span>
+              <span class="meta-tag">price</span>
+              <span class="meta-tag">condition</span>
+              <span class="meta-tag">specs</span>
+            </div>
+          </div>
+
+          <div class="hub-section">
+            <div class="hub-label">Subscriptions</div>
+            <div class="sub-row">
+              <span class="sub-dot"></span>
+              <span class="sub-topic">order.updates</span>
+              <span class="sub-check">✓</span>
+            </div>
+            <div class="sub-note">${BUYER.name} subscribed at boot</div>
+          </div>
+
+          <div class="hub-section">
+            <div class="hub-label">Simulate Backend</div>
+            <div class="hub-actions-note">POST /notify → topic_subscribers → buyer WS</div>
+            <div class="order-btns">${orderBtns}</div>
+          </div>
+
+          <div class="hub-section hub-feed-section">
+            <div class="hub-label">
+              🔔 Notifications
+              <span class="notif-count hidden" id="notif-count">0</span>
+            </div>
+            <div class="notif-feed" id="notif-feed">
+              <div class="notif-empty">Waiting for order updates…</div>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- Seller Panel -->
+        <div class="panel">
+          <div class="panel-header">
+            <div class="user-row">
+              <div class="avatar avatar-seller">${SELLER.initials}</div>
+              <div>
+                <div class="user-name">${SELLER.name}</div>
+                <div class="user-role">Seller</div>
+              </div>
+            </div>
+            <div class="presence" id="seller-presence">
+              <span class="presence-dot online"></span>
+              <span class="presence-label">Online</span>
+            </div>
+          </div>
+          <div class="messages" id="seller-messages">
+            <div class="messages-empty">Type a message to start the conversation</div>
+          </div>
+          <div class="typing-row hidden" id="seller-typing">
+            <div class="typing-bubbles"><span></span><span></span><span></span></div>
+            <span class="typing-label">${BUYER.name} is typing…</span>
+          </div>
+          <div class="input-row">
+            <input class="msg-input" id="seller-input" type="text"
+              placeholder="Message as ${SELLER.name}…" autocomplete="off" />
+            <button class="send-btn send-seller" id="seller-send">↑</button>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  `;
+
+  wireChat(roomId, buyerSDK, sellerSDK);
+}
+
+// ─── Chat + Notification Wiring ───────────────────────────────────────────────
+
+function wireChat(roomId: string, buyerSDK: ChatAPI, sellerSDK: ChatAPI): void {
+  let buyerTypingTimer:  ReturnType<typeof setTimeout> | null = null;
+  let sellerTypingTimer: ReturnType<typeof setTimeout> | null = null;
+  let notifCount = 0;
+
+  // Messages
+  buyerSDK.on('message', (ev) => {
+    if (ev.room_id !== roomId) return;
+    clearEmpty('buyer-messages');
+    appendMsg('buyer-messages', toMsg(ev), ev.sender_id === BUYER.id);
+    buyerSDK.acknowledgeMessage(roomId, ev.seq);
+  });
+
+  sellerSDK.on('message', (ev) => {
+    if (ev.room_id !== roomId) return;
+    clearEmpty('seller-messages');
+    appendMsg('seller-messages', toMsg(ev), ev.sender_id === SELLER.id);
+    sellerSDK.acknowledgeMessage(roomId, ev.seq);
+  });
+
+  // Delivery ACKs
+  buyerSDK.on('ack.received', (ev) => {
+    if (ev.room_id === roomId) markDelivered('buyer-messages', ev.seq);
+  });
+
+  sellerSDK.on('ack.received', (ev) => {
+    if (ev.room_id === roomId) markDelivered('seller-messages', ev.seq);
+  });
+
+  // Typing
+  buyerSDK.on('typing', (ev) => {
+    if (ev.room_id === roomId && ev.user_id !== BUYER.id) toggleTyping('buyer-typing', ev.action === 'start');
+  });
+
+  sellerSDK.on('typing', (ev) => {
+    if (ev.room_id === roomId && ev.user_id !== SELLER.id) toggleTyping('seller-typing', ev.action === 'start');
+  });
+
+  // Presence
+  buyerSDK.on('presence.update', (ev) => {
+    if (ev.user_id === SELLER.id) updatePresence('buyer-presence', ev.status === 'online');
+  });
+
+  sellerSDK.on('presence.update', (ev) => {
+    if (ev.user_id === BUYER.id) updatePresence('seller-presence', ev.status === 'online');
+  });
+
+  // Notifications — buyer only (seller is not subscribed to order.updates)
+  buyerSDK.on('notification', (ev) => {
+    let payload: Record<string, string> = {};
+    try { payload = JSON.parse(ev.payload); } catch { /* non-JSON */ }
+
+    notifCount++;
+    const badge = document.getElementById('notif-count')!;
+    badge.textContent = String(notifCount);
+    badge.classList.remove('hidden');
+
+    appendNotification(ev.topic, payload);
+    showToast(payload.message || ev.topic, getStatusIcon(payload.status));
+  });
+
+  // Order update buttons — simulates backend calling POST /notify
+  ORDER_EVENTS.forEach((event, i) => {
+    const btn = document.getElementById(`order-btn-${i}`) as HTMLButtonElement;
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      btn.classList.add('btn-sending');
+      btn.querySelector('.order-btn-label')!.textContent = 'Sending…';
+
+      try {
+        await sellerSDK.notifications.send({
+          topic: 'order.updates',
+          payload: {
+            status:  event.status,
+            message: event.message,
+            item:    LISTING.title,
+            ...('tracking' in event ? { tracking: event.tracking } : {}),
+          },
+          targets: { topic_subscribers: true },
+        });
+        btn.classList.remove('btn-sending');
+        btn.classList.add('btn-sent');
+        btn.querySelector('.order-btn-label')!.textContent = 'Sent ✓';
+      } catch {
+        btn.disabled = false;
+        btn.classList.remove('btn-sending');
+        btn.querySelector('.order-btn-label')!.textContent = event.label;
+      }
+    });
+  });
+
+  // Input binding
+  bindInput('buyer-input',  'buyer-send',  buyerSDK,  () => buyerTypingTimer,  (t) => { buyerTypingTimer  = t; });
+  bindInput('seller-input', 'seller-send', sellerSDK, () => sellerTypingTimer, (t) => { sellerTypingTimer = t; });
+
+  function bindInput(
+    inputId: string,
+    btnId: string,
+    sdk: ChatAPI,
+    getTimer: () => ReturnType<typeof setTimeout> | null,
+    setTimer: (t: ReturnType<typeof setTimeout>) => void,
+  ): void {
+    const input = document.getElementById(inputId) as HTMLInputElement;
+    const send = () => {
+      const text = input.value.trim();
+      if (!text) return;
+      input.value = '';
+      sdk.sendMessage(roomId, text);
+      sdk.sendTyping(roomId, 'stop');
+      const t = getTimer();
+      if (t) clearTimeout(t);
+    };
+    document.getElementById(btnId)!.addEventListener('click', send);
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { send(); return; }
+      sdk.sendTyping(roomId, 'start');
+      const t = getTimer();
+      if (t) clearTimeout(t);
+      setTimer(setTimeout(() => sdk.sendTyping(roomId, 'stop'), 2000));
+    });
+  }
+}
+
+// ─── Notification Helpers ────────────────────────────────────────────────────
+
+function appendNotification(topic: string, payload: Record<string, string>): void {
+  const feed = document.getElementById('notif-feed')!;
+  feed.querySelector('.notif-empty')?.remove();
+
+  const el = document.createElement('div');
+  el.className = 'notif-item notif-enter';
+  el.innerHTML = `
+    <div class="notif-icon">${getStatusIcon(payload.status)}</div>
+    <div class="notif-body">
+      <div class="notif-message">${esc(payload.message || topic)}</div>
+      ${payload.tracking ? `<div class="notif-tracking">📬 ${esc(payload.tracking)}</div>` : ''}
+      <div class="notif-footer">
+        <span class="notif-topic-badge">${esc(topic)}</span>
+        <span class="notif-time">${now()}</span>
+      </div>
+    </div>
+  `;
+  feed.insertBefore(el, feed.firstChild);
+  requestAnimationFrame(() => el.classList.remove('notif-enter'));
+}
+
+function showToast(message: string, icon: string): void {
+  const toast = document.createElement('div');
+  toast.className = 'notif-toast';
+  toast.innerHTML = `
+    <div class="toast-icon">${icon}</div>
+    <div class="toast-body">
+      <div class="toast-label">order.updates</div>
+      <div class="toast-message">${esc(message)}</div>
+    </div>
+  `;
+  document.body.appendChild(toast);
+  requestAnimationFrame(() => {
+    toast.classList.add('toast-show');
+    setTimeout(() => {
+      toast.classList.remove('toast-show');
+      setTimeout(() => toast.remove(), 350);
+    }, 4000);
+  });
+}
+
+function getStatusIcon(status?: string): string {
+  const map: Record<string, string> = {
+    confirmed: '✅', payment_verified: '💳', packaged: '📦', shipped: '🚚',
+  };
+  return map[status ?? ''] ?? '🔔';
+}
+
+// ─── DOM Helpers ──────────────────────────────────────────────────────────────
+
+function toMsg(ev: { message_id: string; sender_id: string; content: string; seq: number; meta?: string }): ChatMsg {
+  return { id: ev.message_id, senderId: ev.sender_id, content: ev.content, seq: ev.seq, time: now(), meta: ev.meta };
+}
+
+function clearEmpty(listId: string): void {
+  document.querySelector(`#${listId} .messages-empty`)?.remove();
+}
+
+function appendMsg(listId: string, msg: ChatMsg, isSelf: boolean): void {
+  const list = document.getElementById(listId)!;
+  const el = document.createElement('div');
+  el.className = `msg ${isSelf ? 'msg-self' : 'msg-other'}`;
+  el.dataset.seq = String(msg.seq);
+
+  let displayName = '';
+  if (!isSelf && msg.meta) {
+    try {
+      const m = typeof msg.meta === 'string' ? JSON.parse(msg.meta) : msg.meta;
+      if (m.displayName) displayName = m.displayName;
+    } catch { /* ignore */ }
+  }
+
+  el.innerHTML = `
+    <div class="bubble">
+      ${displayName ? `<div class="bubble-sender">${esc(displayName)}</div>` : ''}
+      <div class="bubble-text">${esc(msg.content)}</div>
+      <div class="bubble-meta">
+        <span class="msg-time">${msg.time}</span>
+        ${isSelf ? '<span class="msg-status" title="Sent">✓</span>' : ''}
+      </div>
+    </div>
+  `;
+  list.appendChild(el);
+  list.scrollTop = list.scrollHeight;
+}
+
+function markDelivered(listId: string, seq: number): void {
+  const el = document.querySelector(`#${listId} [data-seq="${seq}"] .msg-status`);
+  if (el) { el.textContent = '✓✓'; el.classList.add('delivered'); el.setAttribute('title', 'Delivered'); }
+}
+
+function toggleTyping(id: string, show: boolean): void {
+  document.getElementById(id)!.classList.toggle('hidden', !show);
+}
+
+function updatePresence(id: string, online: boolean): void {
+  const el = document.getElementById(id)!;
+  el.querySelector('.presence-dot')!.className = `presence-dot ${online ? 'online' : 'offline'}`;
+  el.querySelector('.presence-label')!.textContent = online ? 'Online' : 'Offline';
+}
+
+function now(): string {
+  return new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+}
+
+function esc(text: string): string {
+  const d = document.createElement('div');
+  d.appendChild(document.createTextNode(text));
+  return d.innerHTML;
+}
