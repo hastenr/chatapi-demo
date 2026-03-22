@@ -18,29 +18,10 @@ if (!BASE_URL || !API_KEY) {
 }
 
 // ─── Session ──────────────────────────────────────────────────────────────────
-// Random suffix per page load so each visitor gets their own isolated room
 
-const sid    = Math.random().toString(36).slice(2, 8);
-const BUYER  = { id: `buyer_${sid}`,  name: 'Sarah Kim',  initials: 'SK' };
-const SELLER = { id: `seller_${sid}`, name: 'Mike Chen',  initials: 'MC' };
-
-// ─── Demo Data ────────────────────────────────────────────────────────────────
-
-const LISTING = {
-  id:        'listing_mbp2021_sf',
-  title:     'MacBook Pro M1 (2021)',
-  price:     '$1,200',
-  condition: 'Like New',
-  specs:     '8GB RAM · 256GB SSD · Space Gray',
-  emoji:     '💻',
-};
-
-const ORDER_EVENTS = [
-  { label: 'Confirm Order',   icon: '✅', status: 'confirmed',        message: 'Your order has been confirmed!',       color: '#10b981' },
-  { label: 'Verify Payment',  icon: '💳', status: 'payment_verified', message: `Payment of ${LISTING.price} verified`, color: '#6366f1' },
-  { label: 'Package Item',    icon: '📦', status: 'packaged',         message: 'Item has been securely packaged',      color: '#f59e0b' },
-  { label: 'Mark as Shipped', icon: '🚚', status: 'shipped',          message: 'Your order is on its way!', tracking: 'USPS9400111899223397718234', color: '#3b82f6' },
-] as const;
+const sid     = Math.random().toString(36).slice(2, 8);
+const CUSTOMER = { id: `visitor_${sid}`, name: 'You' };
+const AGENT    = { id: `agent_${sid}`,   name: 'Alex Rivera', initials: 'AR' };
 
 // ─── Static Content ───────────────────────────────────────────────────────────
 
@@ -70,22 +51,11 @@ client.on('message', (ev) => console.log(ev.content));
 client.sendMessage('room_abc', 'Hello!');
 
 // Notifications
-await client.subscriptions.subscribe('order.updates');
+await client.subscriptions.subscribe('support.queue');
 client.on('notification', (ev) => {
   const data = JSON.parse(ev.payload);
   console.log(data.message);
 });`;
-
-// ─── Types ────────────────────────────────────────────────────────────────────
-
-interface ChatMsg {
-  id: string;
-  senderId: string;
-  content: string;
-  seq: number;
-  time: string;
-  meta?: string;
-}
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
 
@@ -159,7 +129,7 @@ function renderLandingPage(): void {
       <div class="lp-section-inner">
         <div class="lp-demo-hdr">
           <h2 class="lp-section-title">See it live</h2>
-          <p class="lp-section-sub">A real marketplace scenario — buyer and seller chat, with order status notifications delivered over WebSocket in real time.</p>
+          <p class="lp-section-sub">A real support chat — customer on the left, agent dashboard on the right. Toggle the agent away to see topic notifications fire in real time.</p>
         </div>
         <div id="demo-container" class="lp-demo-container">
           <div class="lp-demo-launch">
@@ -191,7 +161,6 @@ function renderLandingPage(): void {
     </footer>
   `;
 
-  // Set code block via textContent to avoid escaping issues
   const codeContainer = document.getElementById('code-block-container')!;
   codeContainer.innerHTML = `
     <div class="lp-code-header">
@@ -202,7 +171,6 @@ function renderLandingPage(): void {
   `;
   document.getElementById('code-pre')!.textContent = CODE_SNIPPET;
 
-  // "Try it live" scrolls to demo and auto-launches
   const scrollAndLaunch = (e: Event) => {
     e.preventDefault();
     document.getElementById('demo')!.scrollIntoView({ behavior: 'smooth' });
@@ -226,25 +194,22 @@ async function launchDemo(): Promise<void> {
   `;
 
   try {
-    const buyerSDK = new ChatAPI({ baseURL: BASE_URL, apiKey: API_KEY, userId: BUYER.id, displayName: BUYER.name });
-
-    const room = await buyerSDK.rooms.create({
+    // Create a shared support room
+    const bootstrap = new ChatAPI({ baseURL: BASE_URL, apiKey: API_KEY, userId: AGENT.id });
+    const room = await bootstrap.rooms.create({
       type: 'dm',
-      members: [BUYER.id, SELLER.id],
-      metadata: JSON.stringify({
-        listing_id: LISTING.id,
-        title:      LISTING.title,
-        price:      LISTING.price,
-        condition:  LISTING.condition,
-        specs:      LISTING.specs,
-      }),
+      members: [CUSTOMER.id, AGENT.id],
     });
 
-    const sellerSDK = new ChatAPI({ baseURL: BASE_URL, apiKey: API_KEY, userId: SELLER.id, displayName: SELLER.name });
-    await Promise.all([buyerSDK.connect(), sellerSDK.connect()]);
-    await buyerSDK.subscriptions.subscribe('order.updates');
+    // Connect both sides
+    const customerSDK = new ChatAPI({ baseURL: BASE_URL, apiKey: API_KEY, userId: CUSTOMER.id, displayName: CUSTOMER.name });
+    const agentSDK    = new ChatAPI({ baseURL: BASE_URL, apiKey: API_KEY, userId: AGENT.id,    displayName: AGENT.name });
+    await Promise.all([customerSDK.connect(), agentSDK.connect()]);
 
-    renderDemoUI(container, room.room_id, buyerSDK, sellerSDK);
+    // Agent subscribes to be notified when away and customer sends a message
+    await agentSDK.subscriptions.subscribe('support.queue');
+
+    renderDemoUI(container, room.room_id, customerSDK, agentSDK);
   } catch (err) {
     container.innerHTML = `
       <div class="lp-demo-launch">
@@ -260,381 +225,399 @@ async function launchDemo(): Promise<void> {
 
 // ─── Demo UI ──────────────────────────────────────────────────────────────────
 
-function renderDemoUI(container: HTMLElement, roomId: string, buyerSDK: ChatAPI, sellerSDK: ChatAPI): void {
-  const orderBtns = ORDER_EVENTS.map((e, i) => `
-    <button class="order-btn" id="order-btn-${i}" style="--accent:${e.color}">
-      <span class="order-btn-icon">${e.icon}</span>
-      <span class="order-btn-label">${e.label}</span>
-    </button>
-  `).join('');
-
+function renderDemoUI(container: HTMLElement, roomId: string, customerSDK: ChatAPI, agentSDK: ChatAPI): void {
   container.innerHTML = `
     <div class="demo-screen">
 
-      <div class="demo-header">
-        <div class="header-left">
-          <div class="brand">
-            <span class="brand-dot"></span>
-            <span class="brand-name">ChatAPI</span>
-          </div>
-          <span class="live-badge">● Live</span>
+      <!-- ── Left: Customer view ───────────────────────────────────────────── -->
+      <div class="demo-left">
+        <div class="pane-label">
+          <span class="pane-label-dot customer-dot"></span>
+          Customer view
         </div>
-
-        <div class="listing-card">
-          <span class="listing-emoji">${LISTING.emoji}</span>
-          <div class="listing-info">
-            <div class="listing-title">${LISTING.title}</div>
-            <div class="listing-meta">
-              <strong>${LISTING.price}</strong>
-              <span class="sep">·</span>${LISTING.condition}
-              <span class="sep">·</span>${LISTING.specs}
-              <span class="sep">·</span>
-              <span class="listing-id-tag">#${LISTING.id}</span>
+        <div class="fake-browser">
+          <div class="browser-chrome">
+            <div class="browser-dots"><span></span><span></span><span></span></div>
+            <div class="browser-url">acmesaas.com/pricing</div>
+          </div>
+          <div class="fake-page">
+            <div class="fake-page-hero">
+              <div class="fake-logo">Acme</div>
+              <h3 class="fake-heading">Upgrade your plan</h3>
+              <p class="fake-sub">Unlock unlimited seats, priority support, and advanced analytics.</p>
+              <div class="fake-plan-cards">
+                <div class="fake-plan active-plan">
+                  <div class="fake-plan-name">Pro</div>
+                  <div class="fake-plan-price">$99<span>/mo</span></div>
+                </div>
+                <div class="fake-plan">
+                  <div class="fake-plan-name">Enterprise</div>
+                  <div class="fake-plan-price">Custom</div>
+                </div>
+              </div>
             </div>
           </div>
-        </div>
 
-        <div class="feature-chips">
-          <span class="chip">⚡ Real-time</span>
-          <span class="chip">⌨️ Typing</span>
-          <span class="chip">👁 Presence</span>
-          <span class="chip">✓ Delivery</span>
-          <span class="chip">🏷 Metadata</span>
-          <span class="chip">🔔 Notifications</span>
+          <!-- Chat widget -->
+          <div class="chat-widget" id="chat-widget">
+            <div class="widget-window" id="widget-window">
+              <div class="widget-header">
+                <div class="widget-agent-info">
+                  <div class="widget-avatar">${AGENT.initials}</div>
+                  <div>
+                    <div class="widget-agent-name">${AGENT.name}</div>
+                    <div class="widget-agent-status" id="widget-agent-status">
+                      <span class="status-dot online" id="widget-status-dot"></span>
+                      <span id="widget-status-text">Online</span>
+                    </div>
+                  </div>
+                </div>
+                <button class="widget-minimize" id="widget-minimize" title="Minimize">−</button>
+              </div>
+              <div class="widget-messages" id="widget-messages">
+                <div class="widget-intro">
+                  <div class="widget-avatar lg">${AGENT.initials}</div>
+                  <p>Hi there! I'm ${AGENT.name}. How can I help you today?</p>
+                </div>
+              </div>
+              <div class="widget-typing-row hidden" id="widget-typing">
+                <div class="typing-dots"><span></span><span></span><span></span></div>
+                <span>${AGENT.name} is typing…</span>
+              </div>
+              <div class="widget-input-row">
+                <input class="widget-input" id="widget-input" type="text"
+                  placeholder="Type a message…" autocomplete="off" />
+                <button class="widget-send-btn" id="widget-send">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                </button>
+              </div>
+            </div>
+            <button class="widget-fab" id="widget-fab" title="Open chat" style="display:none">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+              <span class="fab-badge hidden" id="fab-badge">1</span>
+            </button>
+          </div>
         </div>
       </div>
 
-      <div class="panels">
-
-        <!-- Buyer -->
-        <div class="panel">
-          <div class="panel-header">
-            <div class="user-row">
-              <div class="avatar avatar-buyer">${BUYER.initials}</div>
+      <!-- ── Right: Agent dashboard ─────────────────────────────────────────── -->
+      <div class="demo-right">
+        <div class="pane-label">
+          <span class="pane-label-dot agent-dot"></span>
+          Agent dashboard
+        </div>
+        <div class="agent-dashboard">
+          <div class="agent-topbar">
+            <div class="agent-identity">
+              <div class="agent-avatar">${AGENT.initials}</div>
               <div>
-                <div class="user-name">${BUYER.name}</div>
-                <div class="user-role">Buyer</div>
+                <div class="agent-name">${AGENT.name}</div>
+                <div class="agent-subtitle">Support Agent</div>
               </div>
             </div>
-            <div class="panel-controls">
-              <div class="presence" id="buyer-presence">
-                <span class="presence-dot online"></span>
-                <span class="presence-label">Online</span>
-              </div>
-              <button class="conn-btn conn-btn-disconnect" id="buyer-conn-btn" title="Disconnect">⏏</button>
+            <div class="agent-controls">
+              <button class="status-pill online" id="status-pill">● Online</button>
+              <button class="agent-conn-btn connected" id="agent-conn-btn">Disconnect</button>
             </div>
           </div>
-          <div class="messages" id="buyer-messages">
-            <div class="messages-empty">Type a message to start the conversation</div>
+
+          <div class="notif-banner hidden" id="notif-banner">
+            <span class="notif-banner-icon">🔔</span>
+            <span id="notif-banner-text">New message from customer</span>
+            <button class="notif-banner-dismiss" id="notif-banner-dismiss">×</button>
           </div>
-          <div class="typing-row hidden" id="buyer-typing">
-            <div class="typing-bubbles"><span></span><span></span><span></span></div>
-            <span class="typing-label">${SELLER.name} is typing…</span>
+
+          <div class="agent-conv-header">
+            <div class="conv-customer-name">${CUSTOMER.name}</div>
+            <div class="conv-room-id" title="${roomId}">room: ${roomId.slice(0, 16)}…</div>
           </div>
-          <div class="input-row">
-            <input class="msg-input" id="buyer-input" type="text"
-              placeholder="Message as ${BUYER.name}…" autocomplete="off" />
-            <button class="send-btn send-buyer" id="buyer-send">↑</button>
+
+          <div class="agent-messages" id="agent-messages">
+            <div class="agent-messages-empty">Waiting for customer…</div>
+          </div>
+
+          <div class="agent-typing-row hidden" id="agent-typing">
+            <div class="typing-dots"><span></span><span></span><span></span></div>
+            <span>Customer is typing…</span>
+          </div>
+
+          <div class="agent-input-row">
+            <input class="agent-input" id="agent-input" type="text"
+              placeholder="Reply as ${AGENT.name}…" autocomplete="off" />
+            <button class="agent-send-btn" id="agent-send">Send</button>
           </div>
         </div>
-
-        <!-- Order Hub -->
-        <div class="order-hub">
-          <div class="hub-section">
-            <div class="hub-label">Room</div>
-            <div class="hub-room-id" title="${roomId}">${roomId.slice(0, 14)}…</div>
-          </div>
-          <div class="hub-section">
-            <div class="hub-label">Room Metadata</div>
-            <div class="meta-tags">
-              <span class="meta-tag">listing_id</span>
-              <span class="meta-tag">price</span>
-              <span class="meta-tag">condition</span>
-              <span class="meta-tag">specs</span>
-            </div>
-          </div>
-          <div class="hub-section">
-            <div class="hub-label">Subscriptions</div>
-            <div class="sub-row">
-              <span class="sub-dot"></span>
-              <span class="sub-topic">order.updates</span>
-              <span class="sub-check">✓</span>
-            </div>
-            <div class="sub-note">${BUYER.name} subscribed at boot</div>
-          </div>
-          <div class="hub-section">
-            <div class="hub-label">Simulate Backend</div>
-            <div class="hub-actions-note">POST /notify → topic_subscribers → buyer WS</div>
-            <div class="order-btns">${orderBtns}</div>
-          </div>
-          <div class="hub-section hub-feed-section">
-            <div class="hub-label">
-              🔔 Notifications
-              <span class="notif-count hidden" id="notif-count">0</span>
-            </div>
-            <div class="notif-feed" id="notif-feed">
-              <div class="notif-empty">Waiting for order updates…</div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Seller -->
-        <div class="panel">
-          <div class="panel-header">
-            <div class="user-row">
-              <div class="avatar avatar-seller">${SELLER.initials}</div>
-              <div>
-                <div class="user-name">${SELLER.name}</div>
-                <div class="user-role">Seller</div>
-              </div>
-            </div>
-            <div class="panel-controls">
-              <div class="presence" id="seller-presence">
-                <span class="presence-dot online"></span>
-                <span class="presence-label">Online</span>
-              </div>
-              <button class="conn-btn conn-btn-disconnect" id="seller-conn-btn" title="Disconnect">⏏</button>
-            </div>
-          </div>
-          <div class="messages" id="seller-messages">
-            <div class="messages-empty">Type a message to start the conversation</div>
-          </div>
-          <div class="typing-row hidden" id="seller-typing">
-            <div class="typing-bubbles"><span></span><span></span><span></span></div>
-            <span class="typing-label">${BUYER.name} is typing…</span>
-          </div>
-          <div class="input-row">
-            <input class="msg-input" id="seller-input" type="text"
-              placeholder="Message as ${SELLER.name}…" autocomplete="off" />
-            <button class="send-btn send-seller" id="seller-send">↑</button>
-          </div>
-        </div>
-
       </div>
+
     </div>
   `;
 
-  wireChat(roomId, buyerSDK, sellerSDK);
+  wireDemo(roomId, customerSDK, agentSDK);
 }
 
-// ─── Chat + Notification Wiring ───────────────────────────────────────────────
+// ─── Demo Wiring ──────────────────────────────────────────────────────────────
 
-function wireChat(roomId: string, buyerSDK: ChatAPI, sellerSDK: ChatAPI): void {
-  let buyerTypingTimer:  ReturnType<typeof setTimeout> | null = null;
-  let sellerTypingTimer: ReturnType<typeof setTimeout> | null = null;
-  let notifCount = 0;
+function wireDemo(roomId: string, customerSDK: ChatAPI, agentSDK: ChatAPI): void {
+  let customerTypingTimer: ReturnType<typeof setTimeout> | null = null;
+  let agentTypingTimer:    ReturnType<typeof setTimeout> | null = null;
+  let agentIsAway = false;
+  let widgetOpen  = true;
+  let unreadCount = 0;
 
-  buyerSDK.on('message', (ev) => {
+  // ── Messaging ────────────────────────────────────────────────────────────────
+
+  customerSDK.on('message', (ev) => {
     if (ev.room_id !== roomId) return;
-    clearEmpty('buyer-messages');
-    appendMsg('buyer-messages', toMsg(ev), ev.sender_id === BUYER.id);
-    buyerSDK.acknowledgeMessage(roomId, ev.seq);
+    clearEmpty('widget-messages');
+    appendWidgetMsg(ev.sender_id === CUSTOMER.id, ev.content, ev.seq);
+    customerSDK.acknowledgeMessage(roomId, ev.seq);
+    if (ev.sender_id !== CUSTOMER.id && !widgetOpen) {
+      unreadCount++;
+      showFabBadge(unreadCount);
+    }
   });
 
-  sellerSDK.on('message', (ev) => {
+  agentSDK.on('message', (ev) => {
     if (ev.room_id !== roomId) return;
-    clearEmpty('seller-messages');
-    appendMsg('seller-messages', toMsg(ev), ev.sender_id === SELLER.id);
-    sellerSDK.acknowledgeMessage(roomId, ev.seq);
+    clearEmpty('agent-messages');
+    appendAgentMsg(ev.sender_id === AGENT.id, ev.sender_id === CUSTOMER.id ? CUSTOMER.name : AGENT.name, ev.content, ev.seq);
+    agentSDK.acknowledgeMessage(roomId, ev.seq);
+
+    // When away and customer sends a message, simulate a backend notification
+    if (agentIsAway && ev.sender_id === CUSTOMER.id) {
+      customerSDK.notifications.send({
+        topic: 'support.queue',
+        payload: { message: `New message from ${CUSTOMER.name}: "${ev.content}"` },
+        targets: { topic_subscribers: true },
+      }).catch(() => {/* ignore */});
+    }
   });
 
-  buyerSDK.on('ack.received', (ev) => {
-    if (ev.room_id === roomId) markDelivered('buyer-messages', ev.seq);
+  // ── Notifications ────────────────────────────────────────────────────────────
+
+  agentSDK.on('notification', (ev) => {
+    let data: Record<string, string> = {};
+    try { data = JSON.parse(ev.payload); } catch { /* non-JSON */ }
+    showNotifBanner(data.message || 'New activity');
+    showToast(data.message || 'New activity');
   });
 
-  sellerSDK.on('ack.received', (ev) => {
-    if (ev.room_id === roomId) markDelivered('seller-messages', ev.seq);
+  // ── Typing ───────────────────────────────────────────────────────────────────
+
+  customerSDK.on('typing', (ev) => {
+    if (ev.room_id === roomId && ev.user_id !== CUSTOMER.id)
+      toggleEl('widget-typing', ev.action === 'start');
   });
 
-  buyerSDK.on('typing', (ev) => {
-    if (ev.room_id === roomId && ev.user_id !== BUYER.id) toggleTyping('buyer-typing', ev.action === 'start');
+  agentSDK.on('typing', (ev) => {
+    if (ev.room_id === roomId && ev.user_id !== AGENT.id)
+      toggleEl('agent-typing', ev.action === 'start');
   });
 
-  sellerSDK.on('typing', (ev) => {
-    if (ev.room_id === roomId && ev.user_id !== SELLER.id) toggleTyping('seller-typing', ev.action === 'start');
+  // ── Presence ─────────────────────────────────────────────────────────────────
+
+  customerSDK.on('presence.update', (ev) => {
+    if (ev.user_id === AGENT.id) updateWidgetPresence(ev.status === 'online');
   });
 
-  buyerSDK.on('presence.update', (ev) => {
-    if (ev.user_id === SELLER.id) updatePresence('buyer-presence', ev.status === 'online');
+  // ── ACK delivery ticks ────────────────────────────────────────────────────────
+
+  customerSDK.on('ack.received', (ev) => {
+    if (ev.room_id === roomId) markDelivered('widget-messages', ev.seq);
+  });
+  agentSDK.on('ack.received', (ev) => {
+    if (ev.room_id === roomId) markDelivered('agent-messages', ev.seq);
   });
 
-  sellerSDK.on('presence.update', (ev) => {
-    if (ev.user_id === BUYER.id) updatePresence('seller-presence', ev.status === 'online');
+  // ── Widget toggle ────────────────────────────────────────────────────────────
+
+  document.getElementById('widget-minimize')!.addEventListener('click', () => {
+    document.getElementById('widget-window')!.style.display = 'none';
+    document.getElementById('widget-fab')!.style.display    = 'flex';
+    widgetOpen = false;
   });
 
-  buyerSDK.on('notification', (ev) => {
-    let payload: Record<string, string> = {};
-    try { payload = JSON.parse(ev.payload); } catch { /* non-JSON */ }
-
-    notifCount++;
-    const badge = document.getElementById('notif-count')!;
-    badge.textContent = String(notifCount);
-    badge.classList.remove('hidden');
-
-    appendNotification(ev.topic, payload);
-    showToast(payload.message || ev.topic, getStatusIcon(payload.status));
+  document.getElementById('widget-fab')!.addEventListener('click', () => {
+    document.getElementById('widget-window')!.style.display = '';
+    document.getElementById('widget-fab')!.style.display    = 'none';
+    widgetOpen = true;
+    unreadCount = 0;
+    const badge = document.getElementById('fab-badge')!;
+    badge.classList.add('hidden');
+    badge.textContent = '';
   });
 
-  ORDER_EVENTS.forEach((event, i) => {
-    const btn = document.getElementById(`order-btn-${i}`) as HTMLButtonElement;
-    btn.addEventListener('click', async () => {
-      btn.disabled = true;
-      btn.classList.add('btn-sending');
-      btn.querySelector('.order-btn-label')!.textContent = 'Sending…';
+  // ── Customer input ───────────────────────────────────────────────────────────
 
-      try {
-        await sellerSDK.notifications.send({
-          topic: 'order.updates',
-          payload: {
-            status:  event.status,
-            message: event.message,
-            item:    LISTING.title,
-            ...('tracking' in event ? { tracking: event.tracking } : {}),
-          },
-          targets: { topic_subscribers: true },
-        });
-        btn.classList.remove('btn-sending');
-        btn.classList.add('btn-sent');
-        btn.querySelector('.order-btn-label')!.textContent = 'Sent ✓';
-      } catch {
-        btn.disabled = false;
-        btn.classList.remove('btn-sending');
-        btn.querySelector('.order-btn-label')!.textContent = event.label;
-      }
-    });
+  bindInput('widget-input', 'widget-send', customerSDK, roomId,
+    () => customerTypingTimer, (t) => { customerTypingTimer = t; });
+
+  // ── Agent input ───────────────────────────────────────────────────────────────
+
+  bindInput('agent-input', 'agent-send', agentSDK, roomId,
+    () => agentTypingTimer, (t) => { agentTypingTimer = t; });
+
+  // ── Agent status toggle ───────────────────────────────────────────────────────
+
+  document.getElementById('status-pill')!.addEventListener('click', () => {
+    agentIsAway = !agentIsAway;
+    const pill = document.getElementById('status-pill')!;
+    pill.textContent = agentIsAway ? '○ Away' : '● Online';
+    pill.className   = `status-pill ${agentIsAway ? 'away' : 'online'}`;
   });
 
-  bindInput('buyer-input',  'buyer-send',  buyerSDK,  () => buyerTypingTimer,  (t) => { buyerTypingTimer  = t; });
-  bindInput('seller-input', 'seller-send', sellerSDK, () => sellerTypingTimer, (t) => { sellerTypingTimer = t; });
+  // ── Agent disconnect / reconnect ─────────────────────────────────────────────
 
-  // Connection state
-  wireConnButton('buyer-conn-btn',  'buyer-presence',  buyerSDK);
-  wireConnButton('seller-conn-btn', 'seller-presence', sellerSDK);
-
-  function bindInput(
-    inputId: string,
-    btnId: string,
-    sdk: ChatAPI,
-    getTimer: () => ReturnType<typeof setTimeout> | null,
-    setTimer: (t: ReturnType<typeof setTimeout>) => void,
-  ): void {
-    const input = document.getElementById(inputId) as HTMLInputElement;
-    const send = () => {
-      const text = input.value.trim();
-      if (!text) return;
-      input.value = '';
-      sdk.sendMessage(roomId, text);
-      sdk.sendTyping(roomId, 'stop');
-      const t = getTimer();
-      if (t) clearTimeout(t);
-    };
-    document.getElementById(btnId)!.addEventListener('click', send);
-    input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') { send(); return; }
-      sdk.sendTyping(roomId, 'start');
-      const t = getTimer();
-      if (t) clearTimeout(t);
-      setTimer(setTimeout(() => sdk.sendTyping(roomId, 'stop'), 2000));
-    });
-  }
-}
-
-// ─── Connection Button ────────────────────────────────────────────────────────
-
-function wireConnButton(btnId: string, presenceId: string, sdk: ChatAPI): void {
-  const btn = document.getElementById(btnId) as HTMLButtonElement;
-
-  const setDisconnected = () => {
-    btn.textContent = '⟳';
-    btn.title = 'Reconnect';
-    btn.classList.remove('conn-btn-disconnect');
-    btn.classList.add('conn-btn-reconnect');
-    const el = document.getElementById(presenceId)!;
-    el.querySelector('.presence-dot')!.className = 'presence-dot offline';
-    el.querySelector('.presence-label')!.textContent = 'Disconnected';
-  };
-
-  const setReconnecting = (attempt: number) => {
-    btn.textContent = '…';
-    btn.title = `Reconnecting (attempt ${attempt})`;
-    btn.disabled = true;
-    const el = document.getElementById(presenceId)!;
-    el.querySelector('.presence-dot')!.className = 'presence-dot reconnecting';
-    el.querySelector('.presence-label')!.textContent = 'Reconnecting…';
-  };
-
-  const setConnected = () => {
-    btn.textContent = '⏏';
-    btn.title = 'Disconnect';
-    btn.disabled = false;
-    btn.classList.remove('conn-btn-reconnect');
-    btn.classList.add('conn-btn-disconnect');
-    const el = document.getElementById(presenceId)!;
-    el.querySelector('.presence-dot')!.className = 'presence-dot online';
-    el.querySelector('.presence-label')!.textContent = 'Online';
-  };
-
-  sdk.on('connection.lost',         ()  => setDisconnected());
-  sdk.on('connection.reconnecting', (ev) => setReconnecting((ev as any).attempt));
-  sdk.on('connection.open',         ()  => setConnected());
-  sdk.on('connection.failed',       ()  => {
-    btn.textContent = '⟳';
-    btn.title = 'Reconnect';
-    btn.disabled = false;
-    btn.classList.remove('conn-btn-disconnect');
-    btn.classList.add('conn-btn-reconnect');
-    const el = document.getElementById(presenceId)!;
-    el.querySelector('.presence-dot')!.className = 'presence-dot offline';
-    el.querySelector('.presence-label')!.textContent = 'Failed';
-  });
-
-  btn.addEventListener('click', async () => {
-    if (btn.classList.contains('conn-btn-disconnect')) {
-      await sdk.disconnect();
-      setDisconnected();
+  const connBtn = document.getElementById('agent-conn-btn')!;
+  connBtn.addEventListener('click', async () => {
+    if (connBtn.classList.contains('connected')) {
+      await agentSDK.disconnect();
+      connBtn.textContent = 'Reconnect';
+      connBtn.className   = 'agent-conn-btn disconnected';
     } else {
-      btn.disabled = true;
-      setReconnecting(0);
+      connBtn.textContent = 'Connecting…';
+      connBtn.className   = 'agent-conn-btn connecting';
       try {
-        await sdk.connect();
-        setConnected();
+        await agentSDK.connect();
+        connBtn.textContent = 'Disconnect';
+        connBtn.className   = 'agent-conn-btn connected';
       } catch {
-        setDisconnected();
+        connBtn.textContent = 'Reconnect';
+        connBtn.className   = 'agent-conn-btn disconnected';
       }
     }
   });
+
+  agentSDK.on('connection.lost',   () => {
+    connBtn.textContent = 'Reconnect';
+    connBtn.className   = 'agent-conn-btn disconnected';
+  });
+  agentSDK.on('connection.open',   () => {
+    connBtn.textContent = 'Disconnect';
+    connBtn.className   = 'agent-conn-btn connected';
+  });
+
+  // ── Notification banner dismiss ───────────────────────────────────────────────
+
+  document.getElementById('notif-banner-dismiss')!.addEventListener('click', () => {
+    document.getElementById('notif-banner')!.classList.add('hidden');
+  });
 }
 
-// ─── Notification Helpers ─────────────────────────────────────────────────────
+// ─── Input Binding ────────────────────────────────────────────────────────────
 
-function appendNotification(topic: string, payload: Record<string, string>): void {
-  const feed = document.getElementById('notif-feed')!;
-  feed.querySelector('.notif-empty')?.remove();
+function bindInput(
+  inputId: string,
+  btnId: string,
+  sdk: ChatAPI,
+  roomId: string,
+  getTimer: () => ReturnType<typeof setTimeout> | null,
+  setTimer: (t: ReturnType<typeof setTimeout>) => void,
+): void {
+  const input = document.getElementById(inputId) as HTMLInputElement;
+  const send = () => {
+    const text = input.value.trim();
+    if (!text) return;
+    input.value = '';
+    try {
+      sdk.sendMessage(roomId, text);
+    } catch { /* disconnected */ }
+    sdk.sendTyping(roomId, 'stop');
+    const t = getTimer();
+    if (t) clearTimeout(t);
+  };
+  document.getElementById(btnId)!.addEventListener('click', send);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { send(); return; }
+    try { sdk.sendTyping(roomId, 'start'); } catch { /* disconnected */ }
+    const t = getTimer();
+    if (t) clearTimeout(t);
+    setTimer(setTimeout(() => { try { sdk.sendTyping(roomId, 'stop'); } catch { /* ok */ } }, 2000));
+  });
+}
 
-  const el = document.createElement('div');
-  el.className = 'notif-item notif-enter';
+// ─── DOM Helpers ──────────────────────────────────────────────────────────────
+
+function clearEmpty(id: string): void {
+  document.querySelector(`#${id} .widget-intro`)?.remove();
+  document.querySelector(`#${id} .agent-messages-empty`)?.remove();
+  document.querySelector(`#${id} .widget-welcome`)?.remove();
+}
+
+function appendWidgetMsg(isSelf: boolean, content: string, seq: number): void {
+  const list = document.getElementById('widget-messages')!;
+  const el   = document.createElement('div');
+  el.className       = `wm ${isSelf ? 'wm-self' : 'wm-other'}`;
+  el.dataset['seq']  = String(seq);
   el.innerHTML = `
-    <div class="notif-icon">${getStatusIcon(payload.status)}</div>
-    <div class="notif-body">
-      <div class="notif-message">${esc(payload.message || topic)}</div>
-      ${payload.tracking ? `<div class="notif-tracking">📬 ${esc(payload.tracking)}</div>` : ''}
-      <div class="notif-footer">
-        <span class="notif-topic-badge">${esc(topic)}</span>
-        <span class="notif-time">${now()}</span>
+    <div class="wm-bubble">
+      <div class="wm-text">${esc(content)}</div>
+      <div class="wm-meta">
+        <span class="wm-time">${now()}</span>
+        ${isSelf ? '<span class="wm-tick" title="Sent">✓</span>' : ''}
       </div>
     </div>
   `;
-  feed.insertBefore(el, feed.firstChild);
-  requestAnimationFrame(() => el.classList.remove('notif-enter'));
+  list.appendChild(el);
+  list.scrollTop = list.scrollHeight;
 }
 
-function showToast(message: string, icon: string): void {
+function appendAgentMsg(isSelf: boolean, senderName: string, content: string, seq: number): void {
+  const list = document.getElementById('agent-messages')!;
+  const el   = document.createElement('div');
+  el.className       = `am ${isSelf ? 'am-self' : 'am-other'}`;
+  el.dataset['seq']  = String(seq);
+  el.innerHTML = `
+    <div class="am-wrap">
+      ${!isSelf ? `<div class="am-sender">${esc(senderName)}</div>` : ''}
+      <div class="am-bubble">
+        <div class="am-text">${esc(content)}</div>
+        <div class="am-meta">
+          <span class="am-time">${now()}</span>
+          ${isSelf ? '<span class="am-tick" title="Sent">✓</span>' : ''}
+        </div>
+      </div>
+    </div>
+  `;
+  list.appendChild(el);
+  list.scrollTop = list.scrollHeight;
+}
+
+function markDelivered(listId: string, seq: number): void {
+  const el = document.querySelector(`#${listId} [data-seq="${seq}"] .wm-tick, #${listId} [data-seq="${seq}"] .am-tick`);
+  if (el) { el.textContent = '✓✓'; el.setAttribute('title', 'Delivered'); }
+}
+
+function toggleEl(id: string, show: boolean): void {
+  document.getElementById(id)!.classList.toggle('hidden', !show);
+}
+
+function updateWidgetPresence(online: boolean): void {
+  const dot  = document.getElementById('widget-status-dot')!;
+  const text = document.getElementById('widget-status-text')!;
+  dot.className  = `status-dot ${online ? 'online' : 'offline'}`;
+  text.textContent = online ? 'Online' : 'Away';
+}
+
+function showFabBadge(count: number): void {
+  const badge = document.getElementById('fab-badge')!;
+  badge.textContent = String(count);
+  badge.classList.remove('hidden');
+}
+
+function showNotifBanner(message: string): void {
+  const banner = document.getElementById('notif-banner')!;
+  document.getElementById('notif-banner-text')!.textContent = message;
+  banner.classList.remove('hidden');
+}
+
+function showToast(message: string): void {
   const toast = document.createElement('div');
   toast.className = 'notif-toast';
   toast.innerHTML = `
-    <div class="toast-icon">${icon}</div>
+    <div class="toast-icon">🔔</div>
     <div class="toast-body">
-      <div class="toast-label">order.updates</div>
+      <div class="toast-label">support.queue</div>
       <div class="toast-message">${esc(message)}</div>
     </div>
   `;
@@ -646,66 +629,6 @@ function showToast(message: string, icon: string): void {
       setTimeout(() => toast.remove(), 350);
     }, 4000);
   });
-}
-
-function getStatusIcon(status?: string): string {
-  const map: Record<string, string> = {
-    confirmed: '✅', payment_verified: '💳', packaged: '📦', shipped: '🚚',
-  };
-  return map[status ?? ''] ?? '🔔';
-}
-
-// ─── DOM Helpers ──────────────────────────────────────────────────────────────
-
-function toMsg(ev: { message_id: string; sender_id: string; content: string; seq: number; meta?: string }): ChatMsg {
-  return { id: ev.message_id, senderId: ev.sender_id, content: ev.content, seq: ev.seq, time: now(), meta: ev.meta };
-}
-
-function clearEmpty(listId: string): void {
-  document.querySelector(`#${listId} .messages-empty`)?.remove();
-}
-
-function appendMsg(listId: string, msg: ChatMsg, isSelf: boolean): void {
-  const list = document.getElementById(listId)!;
-  const el = document.createElement('div');
-  el.className = `msg ${isSelf ? 'msg-self' : 'msg-other'}`;
-  el.dataset.seq = String(msg.seq);
-
-  let displayName = '';
-  if (!isSelf && msg.meta) {
-    try {
-      const m = typeof msg.meta === 'string' ? JSON.parse(msg.meta) : msg.meta;
-      if (m.displayName) displayName = m.displayName;
-    } catch { /* ignore */ }
-  }
-
-  el.innerHTML = `
-    <div class="bubble">
-      ${displayName ? `<div class="bubble-sender">${esc(displayName)}</div>` : ''}
-      <div class="bubble-text">${esc(msg.content)}</div>
-      <div class="bubble-meta">
-        <span class="msg-time">${msg.time}</span>
-        ${isSelf ? '<span class="msg-status" title="Sent">✓</span>' : ''}
-      </div>
-    </div>
-  `;
-  list.appendChild(el);
-  list.scrollTop = list.scrollHeight;
-}
-
-function markDelivered(listId: string, seq: number): void {
-  const el = document.querySelector(`#${listId} [data-seq="${seq}"] .msg-status`);
-  if (el) { el.textContent = '✓✓'; el.classList.add('delivered'); el.setAttribute('title', 'Delivered'); }
-}
-
-function toggleTyping(id: string, show: boolean): void {
-  document.getElementById(id)!.classList.toggle('hidden', !show);
-}
-
-function updatePresence(id: string, online: boolean): void {
-  const el = document.getElementById(id)!;
-  el.querySelector('.presence-dot')!.className = `presence-dot ${online ? 'online' : 'offline'}`;
-  el.querySelector('.presence-label')!.textContent = online ? 'Online' : 'Offline';
 }
 
 function now(): string {
